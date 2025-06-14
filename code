@@ -1,0 +1,143 @@
+# Stock Market Analysis Web App (Full Version with Frontend + Technical Indicators)
+
+from flask import Flask, request, jsonify, render_template
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
+import numpy as np
+import os
+
+app = Flask(__name__, template_folder='templates')
+
+# Function: Scrape stock data from Vietstock (last 30 days)
+def get_vietstock_data(ticker):
+    url = f"https://finance.vietstock.vn/{ticker}.htm"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers)
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    table = soup.find("table", {"id": "stock-price-history"})
+    if not table:
+        return None
+
+    rows = table.find_all("tr")
+    data = []
+    for row in rows[1:]:
+        cols = row.find_all("td")
+        if len(cols) >= 2:
+            date_str = cols[0].text.strip()
+            close_str = cols[1].text.strip().replace(",", "")
+            try:
+                date = datetime.strptime(date_str, "%d/%m/%Y")
+                close = float(close_str)
+                data.append((date, close))
+            except:
+                continue
+
+    df = pd.DataFrame(data, columns=["Date", "Close"])
+    df = df.sort_values("Date").reset_index(drop=True)
+    return df
+
+# Function: Predict next day price using Linear Regression
+def predict_price(df):
+    df['Day'] = np.arange(len(df))
+    X = df[['Day']]
+    y = df['Close']
+    model = LinearRegression()
+    model.fit(X, y)
+    next_day = [[len(df)]]
+    prediction = model.predict(next_day)[0]
+    return round(prediction, 2)
+
+# Function: Calculate indicators
+def calculate_indicators(df):
+    df['SMA5'] = df['Close'].rolling(window=5).mean()
+    df['SMA10'] = df['Close'].rolling(window=10).mean()
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    return df
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/analyze')
+def analyze():
+    ticker = request.args.get('ticker', 'CTG')
+    df = get_vietstock_data(ticker)
+    if df is None or df.empty:
+        return render_template('index.html', error='Không lấy được dữ liệu từ Vietstock.')
+    df = calculate_indicators(df)
+    prediction = predict_price(df)
+    data_json = df.to_dict(orient='records')
+    return render_template('index.html', ticker=ticker, table=df.tail(30).to_html(index=False),
+                           prediction=prediction, last_price=df['Close'].iloc[-1],
+                           data_json=data_json)
+
+if __name__ == '__main__':
+    os.makedirs("templates", exist_ok=True)
+    with open("templates/index.html", "w", encoding="utf-8") as f:
+        f.write("""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Stock AI Analyzer</title>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        </head>
+        <body>
+            <h2>Phân tích cổ phiếu từ Vietstock</h2>
+            <form method="get" action="/analyze">
+                <input name="ticker" placeholder="Nhập mã cổ phiếu (VD: CTG)">
+                <button type="submit">Phân tích</button>
+            </form>
+            {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+            {% if table %}
+                <h3>Kết quả phân tích cho {{ ticker }}</h3>
+                <p>Giá đóng cửa gần nhất: {{ last_price }}</p>
+                <p>Dự đoán giá ngày tiếp theo: <b>{{ prediction }}</b></p>
+                {{ table | safe }}
+                <canvas id="myChart"></canvas>
+                <script>
+                    const rawData = {{ data_json|tojson }};
+                    const labels = rawData.map(r => r.Date.substring(0,10));
+                    const close = rawData.map(r => r.Close);
+                    const sma5 = rawData.map(r => r.SMA5);
+                    const rsi = rawData.map(r => r.RSI);
+                    const ctx = document.getElementById('myChart');
+                    new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: labels,
+                            datasets: [
+                                { label: 'Close', data: close, borderColor: 'blue', fill: false },
+                                { label: 'SMA5', data: sma5, borderColor: 'green', fill: false },
+                                { label: 'RSI', data: rsi, borderColor: 'red', fill: false, yAxisID: 'y1' }
+                            ]
+                        },
+                        options: {
+                            scales: {
+                                y: { beginAtZero: false },
+                                y1: {
+                                    position: 'right',
+                                    beginAtZero: true,
+                                    min: 0,
+                                    max: 100
+                                }
+                            }
+                        }
+                    });
+                </script>
+            {% endif %}
+        </body>
+        </html>
+        """)
+    app.run(debug=True)
