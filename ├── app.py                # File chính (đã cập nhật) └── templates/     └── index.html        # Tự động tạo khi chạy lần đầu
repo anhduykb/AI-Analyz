@@ -1,0 +1,3 @@
+├── app.py                # File chính (đã cập nhật)
+└── templates/
+    └── index.html        # Tự động tạo khi chạy lần đầu
